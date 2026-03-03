@@ -23,7 +23,7 @@ pip install -r requirements.txt -r requirements-build-windows.txt
 if errorlevel 1 exit /b 1
 
 echo [INFO] Building EXE with PyInstaller...
-pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-binaries hid main.py
+pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-all hid main.py
 if errorlevel 1 exit /b 1
 
 echo.

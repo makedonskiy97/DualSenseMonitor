@@ -58,6 +58,42 @@ def _configure_windows_dll_search_path() -> None:
 
 _configure_windows_dll_search_path()
 
+
+def _preload_windows_hidapi_dlls() -> None:
+    if platform.system() != "Windows":
+        return
+    if not getattr(sys, "frozen", False):
+        return
+
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+
+    dll_candidates: List[str] = []
+    for root, _, files in os.walk(meipass):
+        for file_name in files:
+            lower = file_name.lower()
+            if lower.endswith(".dll") and (
+                "hidapi" in lower or lower in {"hid.dll", "libhid.dll"}
+            ):
+                dll_candidates.append(os.path.join(root, file_name))
+
+    for dll_path in dll_candidates:
+        dll_dir = os.path.dirname(dll_path)
+        try:
+            if hasattr(os, "add_dll_directory"):
+                os.add_dll_directory(dll_dir)
+        except Exception:
+            pass
+
+        try:
+            ctypes.CDLL(dll_path)
+        except Exception:
+            pass
+
+
+_preload_windows_hidapi_dlls()
+
 try:
     from PySide6.QtCore import QObject, Qt, Signal
     from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
@@ -88,6 +124,14 @@ try:
     import hid
 except Exception:
     hid = None
+    # Retry once for frozen Windows builds after aggressive DLL preload.
+    if platform.system() == "Windows" and getattr(sys, "frozen", False):
+        try:
+            import importlib
+
+            hid = importlib.import_module("hid")
+        except Exception:
+            hid = None
 
 try:
     import pydualsense as pydualsense_module
@@ -201,7 +245,7 @@ class DualSenseMonitor:
                 connection="Not connected",
                 error=(
                     "hidapi backend is unavailable in this build, so Windows HID detection is disabled. "
-                    "Rebuild EXE with PyInstaller flags: --hidden-import hid --collect-binaries hid."
+                    "Rebuild EXE with PyInstaller flags: --hidden-import hid --collect-all hid."
                 ),
             )
 
