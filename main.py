@@ -180,6 +180,7 @@ class DualSenseMonitor:
         self._last_state = ControllerState()
         self._last_connected = False
         self._last_battery_report: Optional[int] = None
+        self._last_stable_battery_percent: Optional[int] = None
 
         self._pydualsense_obj = None
         self._linux_lib_failed = False
@@ -324,6 +325,8 @@ class DualSenseMonitor:
             else:
                 battery_percent, status = self._read_battery_generic_hid(device_path)
 
+            battery_percent = self._stabilize_battery_reading(battery_percent)
+
             return ControllerState(
                 connected=True,
                 battery_percent=battery_percent,
@@ -350,6 +353,21 @@ class DualSenseMonitor:
                 device_path=device_path,
                 error=f"Failed reading battery info: {exc}",
             )
+
+    def _stabilize_battery_reading(self, battery_percent: Optional[int]) -> Optional[int]:
+        if battery_percent is None:
+            return self._last_stable_battery_percent
+
+        # Ignore one-shot 0% glitches if a plausible stable value already exists.
+        if (
+            battery_percent == 0
+            and self._last_stable_battery_percent is not None
+            and self._last_stable_battery_percent >= 20
+        ):
+            return self._last_stable_battery_percent
+
+        self._last_stable_battery_percent = battery_percent
+        return battery_percent
 
     def _read_state_linux_without_hid(self) -> ControllerState:
         # Linux fallback when python `hid` cannot load hidapi shared libraries.
@@ -783,22 +801,51 @@ class DualSenseMonitor:
             return None, "Unknown"
 
         values = list(report)
+        report_id = values[0] if values else None
 
-        # DualSense commonly exposes battery in byte 53 of extended reports.
-        # lower nibble: level (0-10), upper nibble: charge state flags.
-        if len(values) > 53:
-            packed = values[53]
-            level = packed & 0x0F
-            state_bits = (packed >> 4) & 0x0F
-            if 0 <= level <= 10:
-                percent = level * 10
-                status = self._map_charge_state(state_bits, percent)
-                return percent, status
+        # Different backends may include report_id at index 0 or strip it.
+        # Try both offset models around known DualSense battery bytes.
+        candidate_indices: List[int] = []
+        if report_id in {0x01, 0x31, 0x20, 0x05, 0x09}:
+            candidate_indices.extend([54, 53, 55, 52])
+        candidate_indices.extend([53, 54, 52, 55])
 
-        # Loose fallback: look for plausible percent-like byte and infer status unknown.
-        for candidate in values:
-            if 0 <= candidate <= 100:
-                return candidate, "Unknown"
+        seen = set()
+        ordered_candidates: List[int] = []
+        for idx in candidate_indices:
+            if idx not in seen:
+                ordered_candidates.append(idx)
+                seen.add(idx)
+
+        for idx in ordered_candidates:
+            parsed = self._parse_packed_battery_byte(values, idx)
+            if parsed[0] is not None:
+                return parsed
+
+        # Some backends expose a direct percentage around neighboring indices.
+        for idx in (52, 53, 54, 55):
+            if 0 <= idx < len(values):
+                direct = values[idx]
+                if 1 <= direct <= 100:
+                    return direct, "Unknown"
+
+        return None, "Unknown"
+
+    def _parse_packed_battery_byte(
+        self, values: List[int], index: int
+    ) -> tuple[Optional[int], str]:
+        if not (0 <= index < len(values)):
+            return None, "Unknown"
+
+        packed = values[index]
+        level = packed & 0x0F
+        state_bits = (packed >> 4) & 0x0F
+
+        # Valid packed battery level is 0..10 for DualSense.
+        if 0 <= level <= 10:
+            percent = level * 10
+            status = self._map_charge_state(state_bits, percent)
+            return percent, status
 
         return None, "Unknown"
 
