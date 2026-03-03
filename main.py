@@ -264,12 +264,33 @@ class DualSenseMonitor:
             )
 
         if self.system == "Windows":
+            inferred_connections = [self._infer_connection_type(info) for info in device_infos]
+            has_bt_interface = any(conn == "Bluetooth" for conn in inferred_connections)
+            has_usb_interface = any(conn == "USB" for conn in inferred_connections)
+
             best_unknown_state: Optional[ControllerState] = None
             for device_info in device_infos:
                 connection = self._infer_connection_type(device_info)
                 device_path = device_info.get("path")
                 try:
                     battery_percent, status = self._read_battery_windows_hid(device_path)
+                    battery_percent = self._stabilize_battery_reading(battery_percent)
+                    battery_percent, status = self._normalize_battery_state(
+                        battery_percent, status, connection
+                    )
+
+                    # Windows can expose both BT and USB interfaces while cable is plugged.
+                    # If BT is active and USB interface is also present, treat as charging.
+                    if (
+                        connection == "Bluetooth"
+                        and has_bt_interface
+                        and has_usb_interface
+                        and battery_percent is not None
+                        and battery_percent < 100
+                        and status in {"Unknown", "Discharging"}
+                    ):
+                        status = "Charging"
+
                     current_state = ControllerState(
                         connected=True,
                         battery_percent=battery_percent,
@@ -376,7 +397,15 @@ class DualSenseMonitor:
     def _normalize_battery_state(
         self, battery_percent: Optional[int], status: str, connection: str
     ) -> tuple[Optional[int], str]:
-        normalized_status = status or "Unknown"
+        normalized_status_raw = (status or "Unknown").strip().lower()
+        if normalized_status_raw.startswith("charg"):
+            normalized_status = "Charging"
+        elif normalized_status_raw.startswith("discharg"):
+            normalized_status = "Discharging"
+        elif normalized_status_raw.startswith("full"):
+            normalized_status = "Full"
+        else:
+            normalized_status = "Unknown"
 
         if battery_percent is not None:
             battery_percent = max(0, min(100, battery_percent))
