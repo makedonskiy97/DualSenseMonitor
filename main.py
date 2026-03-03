@@ -148,6 +148,7 @@ DUALSENSE_VID = 0x054C
 # 0x0CE6 = DualSense, 0x0DF2 = DualSense Edge (common alternative PID).
 DUALSENSE_PIDS = {0x0CE6, 0x0DF2}
 DUALSENSE_NAME_HINTS = ("dualsense", "wireless controller", "dualsense edge")
+KNOWN_BATTERY_STATE_BITS = {0x0, 0x1, 0x2, 0x3, 0x4, 0x5, 0x8, 0x9, 0xA, 0xB}
 
 
 @dataclass
@@ -326,6 +327,9 @@ class DualSenseMonitor:
                 battery_percent, status = self._read_battery_generic_hid(device_path)
 
             battery_percent = self._stabilize_battery_reading(battery_percent)
+            battery_percent, status = self._normalize_battery_state(
+                battery_percent, status, connection
+            )
 
             return ControllerState(
                 connected=True,
@@ -368,6 +372,36 @@ class DualSenseMonitor:
 
         self._last_stable_battery_percent = battery_percent
         return battery_percent
+
+    def _normalize_battery_state(
+        self, battery_percent: Optional[int], status: str, connection: str
+    ) -> tuple[Optional[int], str]:
+        normalized_status = status or "Unknown"
+
+        if battery_percent is not None:
+            battery_percent = max(0, min(100, battery_percent))
+
+            # If controller reports Full but percentage is implausibly low,
+            # trust Full state and clamp to 100.
+            if normalized_status == "Full" and battery_percent < 90:
+                battery_percent = 100
+
+            # USB-connected DualSense should typically be charging unless full.
+            if connection == "USB":
+                if battery_percent >= 100:
+                    normalized_status = "Full"
+                elif normalized_status in {"Unknown", "Discharging"}:
+                    normalized_status = "Charging"
+
+            # For Bluetooth, infer charging if percent increased since previous poll.
+            if connection == "Bluetooth" and normalized_status == "Unknown":
+                if (
+                    self._last_stable_battery_percent is not None
+                    and battery_percent > self._last_stable_battery_percent
+                ):
+                    normalized_status = "Charging"
+
+        return battery_percent, normalized_status
 
     def _read_state_linux_without_hid(self) -> ControllerState:
         # Linux fallback when python `hid` cannot load hidapi shared libraries.
@@ -817,17 +851,26 @@ class DualSenseMonitor:
                 ordered_candidates.append(idx)
                 seen.add(idx)
 
+        # Some backends expose a direct percentage around neighboring indices.
+        direct_candidates: List[int] = []
+        for idx in (52, 53, 54, 55):
+            if 0 <= idx < len(values):
+                direct = values[idx]
+                if 0 <= direct <= 100:
+                    direct_candidates.append(direct)
+
+        if direct_candidates:
+            if 100 in direct_candidates:
+                return 100, "Full"
+            # Prefer higher direct values to avoid false-low picks from adjacent bytes.
+            best_direct = max(direct_candidates)
+            if best_direct >= 5:
+                return best_direct, "Unknown"
+
         for idx in ordered_candidates:
             parsed = self._parse_packed_battery_byte(values, idx)
             if parsed[0] is not None:
                 return parsed
-
-        # Some backends expose a direct percentage around neighboring indices.
-        for idx in (52, 53, 54, 55):
-            if 0 <= idx < len(values):
-                direct = values[idx]
-                if 1 <= direct <= 100:
-                    return direct, "Unknown"
 
         return None, "Unknown"
 
@@ -842,7 +885,7 @@ class DualSenseMonitor:
         state_bits = (packed >> 4) & 0x0F
 
         # Valid packed battery level is 0..10 for DualSense.
-        if 0 <= level <= 10:
+        if 0 <= level <= 10 and state_bits in KNOWN_BATTERY_STATE_BITS:
             percent = level * 10
             status = self._map_charge_state(state_bits, percent)
             return percent, status
@@ -854,7 +897,9 @@ class DualSenseMonitor:
         # Best-effort mapping; values can vary by transport/report mode.
         if percent >= 100:
             return "Full"
-        if state_bits in {0x1, 0x2, 0xA, 0xB}:
+        if state_bits in {0x2, 0x9}:
+            return "Full"
+        if state_bits in {0x1, 0x8, 0xA, 0xB}:
             return "Charging"
         if state_bits in {0x0, 0x3, 0x4, 0x5}:
             return "Discharging"
