@@ -31,6 +31,33 @@ def _configure_qt_platform_env() -> None:
 
 _configure_qt_platform_env()
 
+
+def _configure_windows_dll_search_path() -> None:
+    if platform.system() != "Windows":
+        return
+    if not getattr(sys, "frozen", False):
+        return
+
+    # PyInstaller onefile extracts native libs to sys._MEIPASS.
+    # `hid` loads hidapi via dynamic loader, so add this location explicitly.
+    meipass = getattr(sys, "_MEIPASS", None)
+    if not meipass:
+        return
+
+    try:
+        if hasattr(os, "add_dll_directory"):
+            os.add_dll_directory(meipass)
+    except Exception:
+        pass
+
+    # Fallback for loaders that rely on PATH lookup.
+    current_path = os.environ.get("PATH", "")
+    if meipass not in current_path.split(os.pathsep):
+        os.environ["PATH"] = meipass + os.pathsep + current_path
+
+
+_configure_windows_dll_search_path()
+
 try:
     from PySide6.QtCore import QObject, Qt, Signal
     from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
@@ -174,7 +201,7 @@ class DualSenseMonitor:
                 connection="Not connected",
                 error=(
                     "hidapi backend is unavailable in this build, so Windows HID detection is disabled. "
-                    "Reinstall dependencies in a clean venv and rebuild the EXE."
+                    "Rebuild EXE with PyInstaller flags: --hidden-import hid --collect-binaries hid."
                 ),
             )
 

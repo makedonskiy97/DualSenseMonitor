@@ -65,7 +65,7 @@ py -3 -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt -r requirements-build-windows.txt
-pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor main.py
+pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-binaries hid main.py
 ```
 
 Output file:

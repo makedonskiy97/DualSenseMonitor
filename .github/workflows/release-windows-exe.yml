@@ -31,7 +31,7 @@ jobs:
       - name: Build EXE with PyInstaller
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor main.py
+          pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-binaries hid main.py
 
       - name: Generate SHA256
         shell: pwsh
