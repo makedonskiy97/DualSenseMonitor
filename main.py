@@ -269,6 +269,7 @@ class DualSenseMonitor:
             has_usb_interface = any(conn == "USB" for conn in inferred_connections)
 
             best_unknown_state: Optional[ControllerState] = None
+            resolved_states: List[ControllerState] = []
             for device_info in device_infos:
                 connection = self._infer_connection_type(device_info)
                 device_path = device_info.get("path")
@@ -300,7 +301,8 @@ class DualSenseMonitor:
                         error=None,
                     )
                     if battery_percent is not None:
-                        return current_state
+                        resolved_states.append(current_state)
+                        continue
                     if best_unknown_state is None:
                         best_unknown_state = current_state
                 except PermissionError:
@@ -323,6 +325,19 @@ class DualSenseMonitor:
                             device_path=device_path,
                             error=f"Failed reading battery info: {exc}",
                         )
+
+            if resolved_states:
+                # When both interfaces are visible in Windows, prefer USB reading for consistency.
+                if has_usb_interface:
+                    usb_states = [
+                        state
+                        for state in resolved_states
+                        if state.connection == "USB" and state.battery_percent is not None
+                    ]
+                    if usb_states:
+                        return self._select_preferred_state(usb_states)
+
+                return self._select_preferred_state(resolved_states)
 
             if best_unknown_state is not None:
                 return best_unknown_state
@@ -434,6 +449,26 @@ class DualSenseMonitor:
                     normalized_status = "Charging"
 
         return battery_percent, normalized_status
+
+    @staticmethod
+    def _select_preferred_state(states: List[ControllerState]) -> ControllerState:
+        def status_score(status: str) -> int:
+            if status == "Full":
+                return 3
+            if status == "Charging":
+                return 2
+            if status == "Discharging":
+                return 1
+            return 0
+
+        return max(
+            states,
+            key=lambda state: (
+                state.battery_percent if state.battery_percent is not None else -1,
+                status_score(state.status),
+                1 if state.connection == "USB" else 0,
+            ),
+        )
 
     def _read_state_linux_without_hid(self) -> ControllerState:
         # Linux fallback when python `hid` cannot load hidapi shared libraries.
@@ -883,23 +918,6 @@ class DualSenseMonitor:
                 ordered_candidates.append(idx)
                 seen.add(idx)
 
-        # Some backends expose a direct percentage in nearby bytes.
-        # Scan a slightly wider window, then prefer high/plausible percentages.
-        direct_candidates: List[int] = []
-        for idx in range(50, min(len(values), 63)):
-            if 0 <= idx < len(values):
-                direct = values[idx]
-                if 0 <= direct <= 100:
-                    direct_candidates.append(direct)
-
-        if direct_candidates:
-            if 100 in direct_candidates:
-                return 100, "Full"
-            # Prefer higher direct values to avoid false-low picks from adjacent bytes.
-            best_direct = max(direct_candidates)
-            if best_direct >= 20:
-                return best_direct, "Unknown"
-
         parsed_candidates: List[tuple[int, str]] = []
         for idx in ordered_candidates:
             parsed = self._parse_packed_battery_byte(values, idx)
@@ -913,6 +931,22 @@ class DualSenseMonitor:
                 reverse=True,
             )
             return parsed_candidates[0]
+
+        # Fallback for rare backends exposing direct percentage bytes.
+        # Keep this conservative to avoid false values from unrelated payload bytes.
+        direct_candidates: List[int] = []
+        for idx in range(50, min(len(values), 63)):
+            direct = values[idx]
+            if 0 <= direct <= 100 and direct % 5 == 0:
+                direct_candidates.append(direct)
+
+        if direct_candidates:
+            if 100 in direct_candidates:
+                return 100, "Full"
+            # Prefer highest plausible value; low values here are often noise.
+            best_direct = max(direct_candidates)
+            if best_direct >= 50:
+                return best_direct, "Unknown"
 
         return None, "Unknown"
 
