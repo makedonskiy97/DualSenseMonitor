@@ -1,0 +1,56 @@
+name: Build Windows EXE
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-build-windows.txt
+
+      - name: Build EXE with PyInstaller
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor main.py
+
+      - name: Generate SHA256
+        shell: pwsh
+        run: |
+          Get-FileHash dist/DualSenseMonitor.exe -Algorithm SHA256 | Select-Object -ExpandProperty Hash | Out-File -Encoding ascii dist/DualSenseMonitor.exe.sha256
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DualSenseMonitor-windows-exe
+          path: |
+            dist/DualSenseMonitor.exe
+            dist/DualSenseMonitor.exe.sha256
+
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/DualSenseMonitor.exe
+            dist/DualSenseMonitor.exe.sha256
+          generate_release_notes: true

@@ -1,0 +1,8 @@
+PySide6>=6.6
+hid>=1.0.6
+
+# Optional Linux backends (best effort in code):
+pydualsense>=0.7.0,<0.8
+
+# Optional for richer tray integration on some environments.
+pystray>=0.19.5
