@@ -544,6 +544,7 @@ class DualSenseMonitor:
 
     def _infer_connection_type(self, device_info: dict) -> str:
         path = str(device_info.get("path", "")).lower()
+        serial = str(device_info.get("serial_number", "")).lower()
 
         # Linux hidapi commonly exposes bus_type: 0x03 USB, 0x05 Bluetooth
         bus_type = device_info.get("bus_type")
@@ -555,8 +556,16 @@ class DualSenseMonitor:
         # Heuristics for Windows/macOS path strings.
         if "bth" in path or "bluetooth" in path:
             return "Bluetooth"
+        if "mi_" in path:
+            return "USB"
         if "usb" in path or "hid#vid" in path:
             return "USB"
+
+        # Windows BT devices often expose MAC-like serial number.
+        if re.fullmatch(r"([0-9a-f]{2}:){5}[0-9a-f]{2}", serial):
+            return "Bluetooth"
+        if re.fullmatch(r"[0-9a-f]{12}", serial):
+            return "Bluetooth"
 
         return "Unknown"
 
@@ -668,15 +677,19 @@ class DualSenseMonitor:
         if hid is None:
             return None, "Unknown"
 
-        dev = hid.device()
+        dev = self._open_hid_device(device_path)
+        if dev is None:
+            raise RuntimeError(
+                "No compatible HID device constructor found (expected `hid.device` or `hid.Device`)."
+            )
+
         try:
-            dev.open_path(device_path)
-            dev.set_nonblocking(1)
+            self._set_nonblocking(dev, True)
 
             # USB/BT feature report candidates. Battery byte location can vary.
             for report_id, size in [(0x20, 64), (0x05, 64), (0x09, 64), (0x31, 78)]:
                 try:
-                    report = dev.get_feature_report(report_id, size)
+                    report = self._get_feature_report(dev, report_id, size)
                     parsed = self._parse_dualsense_battery_from_report(report)
                     if parsed[0] is not None:
                         return parsed
@@ -687,7 +700,7 @@ class DualSenseMonitor:
 
             # Non-blocking input report fallback.
             for _ in range(8):
-                data = dev.read(78)
+                data = self._read_input_report(dev, 78)
                 if data:
                     parsed = self._parse_dualsense_battery_from_report(data)
                     if parsed[0] is not None:
@@ -703,9 +716,65 @@ class DualSenseMonitor:
             raise
         finally:
             try:
-                dev.close()
+                self._close_hid_device(dev)
             except Exception:
                 pass
+
+    def _open_hid_device(self, device_path: bytes):
+        # `hid` package variants expose either:
+        # - hid.device() + open_path(...)
+        # - hid.Device(path=...)
+        constructor_device = getattr(hid, "device", None)
+        if callable(constructor_device):
+            dev = constructor_device()
+            open_path = getattr(dev, "open_path", None)
+            if callable(open_path):
+                open_path(device_path)
+                return dev
+
+        constructor_Device = getattr(hid, "Device", None)
+        if callable(constructor_Device):
+            try:
+                return constructor_Device(path=device_path)
+            except TypeError:
+                return constructor_Device(device_path)
+
+        return None
+
+    @staticmethod
+    def _set_nonblocking(dev, enabled: bool) -> None:
+        value = 1 if enabled else 0
+        set_nonblocking = getattr(dev, "set_nonblocking", None)
+        if callable(set_nonblocking):
+            set_nonblocking(value)
+            return
+        nonblocking = getattr(dev, "nonblocking", None)
+        if callable(nonblocking):
+            nonblocking(value)
+
+    @staticmethod
+    def _get_feature_report(dev, report_id: int, size: int):
+        getter = getattr(dev, "get_feature_report", None)
+        if callable(getter):
+            return getter(report_id, size)
+        raise RuntimeError("HID backend does not provide get_feature_report")
+
+    @staticmethod
+    def _read_input_report(dev, size: int):
+        reader = getattr(dev, "read", None)
+        if not callable(reader):
+            return []
+        try:
+            return reader(size)
+        except TypeError:
+            # Some backends support read(size, timeout_ms)
+            return reader(size, 10)
+
+    @staticmethod
+    def _close_hid_device(dev) -> None:
+        closer = getattr(dev, "close", None)
+        if callable(closer):
+            closer()
 
     def _parse_dualsense_battery_from_report(
         self, report: List[int] | bytes
