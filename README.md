@@ -65,7 +65,7 @@ py -3 -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt -r requirements-build-windows.txt
-pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-all hid main.py
+pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-all hid --add-binary ".venv\\Lib\\site-packages\\pydualsense\\hidapi.dll;." main.py
 ```
 
 Output file:

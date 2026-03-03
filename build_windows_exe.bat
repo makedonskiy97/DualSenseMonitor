@@ -22,8 +22,17 @@ echo [INFO] Installing runtime and build dependencies...
 pip install -r requirements.txt -r requirements-build-windows.txt
 if errorlevel 1 exit /b 1
 
+set "HID_DLL=.venv\Lib\site-packages\pydualsense\hidapi.dll"
+set "ADD_BINARY="
+if exist "%HID_DLL%" (
+    set "ADD_BINARY=--add-binary %HID_DLL%;."
+    echo [INFO] Including HID runtime DLL: %HID_DLL%
+) else (
+    echo [WARN] pydualsense hidapi.dll not found, continuing without explicit --add-binary.
+)
+
 echo [INFO] Building EXE with PyInstaller...
-pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-all hid main.py
+pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-all hid %ADD_BINARY% main.py
 if errorlevel 1 exit /b 1
 
 echo.

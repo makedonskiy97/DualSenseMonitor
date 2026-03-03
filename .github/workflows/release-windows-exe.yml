@@ -31,7 +31,15 @@ jobs:
       - name: Build EXE with PyInstaller
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-all hid main.py
+          $hidDllPath = python -c "import os, pydualsense; p=os.path.join(os.path.dirname(pydualsense.__file__), 'hidapi.dll'); print(p if os.path.exists(p) else '')"
+          if ($hidDllPath) {
+            Write-Host "Including HID runtime DLL: $hidDllPath"
+            pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-all hid --add-binary "$hidDllPath;." main.py
+          }
+          else {
+            Write-Host "pydualsense hidapi.dll not found, building without explicit --add-binary."
+            pyinstaller --noconfirm --clean --onefile --console --name DualSenseMonitor --hidden-import hid --collect-all hid main.py
+          }
 
       - name: Generate SHA256
         shell: pwsh
