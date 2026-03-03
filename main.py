@@ -388,10 +388,13 @@ class DualSenseMonitor:
 
             # USB-connected DualSense should typically be charging unless full.
             if connection == "USB":
-                if battery_percent >= 100:
+                if battery_percent >= 95:
                     normalized_status = "Full"
                 elif normalized_status in {"Unknown", "Discharging"}:
                     normalized_status = "Charging"
+
+            if connection == "Bluetooth" and battery_percent >= 95:
+                normalized_status = "Full"
 
             # For Bluetooth, infer charging if percent increased since previous poll.
             if connection == "Bluetooth" and normalized_status == "Unknown":
@@ -841,8 +844,8 @@ class DualSenseMonitor:
         # Try both offset models around known DualSense battery bytes.
         candidate_indices: List[int] = []
         if report_id in {0x01, 0x31, 0x20, 0x05, 0x09}:
-            candidate_indices.extend([54, 53, 55, 52])
-        candidate_indices.extend([53, 54, 52, 55])
+            candidate_indices.extend([54, 53, 55, 56, 57, 58, 52, 59, 60])
+        candidate_indices.extend([53, 54, 55, 56, 57, 58, 52, 59, 60])
 
         seen = set()
         ordered_candidates: List[int] = []
@@ -851,9 +854,10 @@ class DualSenseMonitor:
                 ordered_candidates.append(idx)
                 seen.add(idx)
 
-        # Some backends expose a direct percentage around neighboring indices.
+        # Some backends expose a direct percentage in nearby bytes.
+        # Scan a slightly wider window, then prefer high/plausible percentages.
         direct_candidates: List[int] = []
-        for idx in (52, 53, 54, 55):
+        for idx in range(50, min(len(values), 63)):
             if 0 <= idx < len(values):
                 direct = values[idx]
                 if 0 <= direct <= 100:
@@ -864,13 +868,22 @@ class DualSenseMonitor:
                 return 100, "Full"
             # Prefer higher direct values to avoid false-low picks from adjacent bytes.
             best_direct = max(direct_candidates)
-            if best_direct >= 5:
+            if best_direct >= 20:
                 return best_direct, "Unknown"
 
+        parsed_candidates: List[tuple[int, str]] = []
         for idx in ordered_candidates:
             parsed = self._parse_packed_battery_byte(values, idx)
             if parsed[0] is not None:
-                return parsed
+                parsed_candidates.append(parsed)
+
+        if parsed_candidates:
+            # Prefer highest percentage; if equal, prefer more specific status over Unknown.
+            parsed_candidates.sort(
+                key=lambda item: (item[0], 1 if item[1] != "Unknown" else 0),
+                reverse=True,
+            )
+            return parsed_candidates[0]
 
         return None, "Unknown"
 
