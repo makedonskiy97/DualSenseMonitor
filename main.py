@@ -76,6 +76,7 @@ except Exception:
 DUALSENSE_VID = 0x054C
 # 0x0CE6 = DualSense, 0x0DF2 = DualSense Edge (common alternative PID).
 DUALSENSE_PIDS = {0x0CE6, 0x0DF2}
+DUALSENSE_NAME_HINTS = ("dualsense", "wireless controller", "dualsense edge")
 
 
 @dataclass
@@ -166,17 +167,80 @@ class DualSenseMonitor:
         print(f"[{now}] {message}", flush=True)
 
     def read_state(self) -> ControllerState:
+        if self.system == "Windows" and hid is None:
+            return ControllerState(
+                connected=False,
+                status="Unknown",
+                connection="Not connected",
+                error=(
+                    "hidapi backend is unavailable in this build, so Windows HID detection is disabled. "
+                    "Reinstall dependencies in a clean venv and rebuild the EXE."
+                ),
+            )
+
         if self.system == "Linux" and hid is None:
             return self._read_state_linux_without_hid()
 
-        device_info = self._detect_controller()
-        if not device_info:
+        device_infos = self._detect_controllers()
+        if not device_infos:
             return ControllerState(
                 connected=False,
                 status="Unknown",
                 connection="Not connected",
                 error=None,
             )
+
+        if self.system == "Windows":
+            best_unknown_state: Optional[ControllerState] = None
+            for device_info in device_infos:
+                connection = self._infer_connection_type(device_info)
+                device_path = device_info.get("path")
+                try:
+                    battery_percent, status = self._read_battery_windows_hid(device_path)
+                    current_state = ControllerState(
+                        connected=True,
+                        battery_percent=battery_percent,
+                        status=status,
+                        connection=connection,
+                        device_path=device_path,
+                        error=None,
+                    )
+                    if battery_percent is not None:
+                        return current_state
+                    if best_unknown_state is None:
+                        best_unknown_state = current_state
+                except PermissionError:
+                    if best_unknown_state is None:
+                        best_unknown_state = ControllerState(
+                            connected=True,
+                            battery_percent=None,
+                            status="Unknown",
+                            connection=connection,
+                            device_path=device_path,
+                            error="HID permission denied.",
+                        )
+                except Exception as exc:
+                    if best_unknown_state is None:
+                        best_unknown_state = ControllerState(
+                            connected=True,
+                            battery_percent=None,
+                            status="Unknown",
+                            connection=connection,
+                            device_path=device_path,
+                            error=f"Failed reading battery info: {exc}",
+                        )
+
+            if best_unknown_state is not None:
+                return best_unknown_state
+            return ControllerState(
+                connected=True,
+                battery_percent=None,
+                status="Unknown",
+                connection="Unknown",
+                error="DualSense detected, but battery report is unavailable on current HID interface.",
+            )
+
+        device_info = device_infos[0]
 
         connection = self._infer_connection_type(device_info)
         device_path = device_info.get("path")
@@ -328,19 +392,84 @@ class DualSenseMonitor:
         return "USB"
 
     def _detect_controller(self) -> Optional[dict]:
+        controllers = self._detect_controllers()
+        if controllers:
+            return controllers[0]
+        return None
+
+    def _detect_controllers(self) -> List[dict]:
         if hid is None:
-            return None
+            return []
+
+        devices: List[dict] = []
 
         try:
-            devices = hid.enumerate(DUALSENSE_VID, 0)
+            devices.extend(hid.enumerate(DUALSENSE_VID, 0))
         except Exception:
-            devices = []
+            pass
 
+        try:
+            all_devices = hid.enumerate()
+            for info in all_devices:
+                if self._is_dualsense_device(info):
+                    devices.append(info)
+        except Exception:
+            pass
+
+        dedup_by_path = {}
         for info in devices:
-            pid = info.get("product_id")
-            if pid in DUALSENSE_PIDS:
-                return info
-        return None
+            dedup_key = str(info.get("path", ""))
+            dedup_by_path[dedup_key] = info
+
+        candidates = [
+            info for info in dedup_by_path.values() if self._is_dualsense_device(info)
+        ]
+        candidates.sort(key=self._dualsense_score, reverse=True)
+        return candidates
+
+    def _is_dualsense_device(self, info: dict) -> bool:
+        pid = info.get("product_id")
+        vid = info.get("vendor_id")
+        path = str(info.get("path", "")).lower()
+        product = str(info.get("product_string", "")).lower()
+        manufacturer = str(info.get("manufacturer_string", "")).lower()
+
+        if vid == DUALSENSE_VID and pid in DUALSENSE_PIDS:
+            return True
+
+        if "vid_054c" in path and any(
+            f"pid_{known_pid:04x}" in path for known_pid in DUALSENSE_PIDS
+        ):
+            return True
+
+        if any(name_hint in product for name_hint in DUALSENSE_NAME_HINTS):
+            return vid == DUALSENSE_VID or "sony" in manufacturer
+
+        return False
+
+    def _dualsense_score(self, info: dict) -> int:
+        score = 0
+        pid = info.get("product_id")
+        vid = info.get("vendor_id")
+        path = str(info.get("path", "")).lower()
+        product = str(info.get("product_string", "")).lower()
+
+        if pid in DUALSENSE_PIDS:
+            score += 100
+        if vid == DUALSENSE_VID:
+            score += 40
+        if "vid_054c" in path and any(
+            f"pid_{known_pid:04x}" in path for known_pid in DUALSENSE_PIDS
+        ):
+            score += 60
+        if any(name_hint in product for name_hint in DUALSENSE_NAME_HINTS):
+            score += 30
+
+        interface_number = info.get("interface_number")
+        if isinstance(interface_number, int):
+            score += max(0, 5 - abs(interface_number))
+
+        return score
 
     def _infer_connection_type(self, device_info: dict) -> str:
         path = str(device_info.get("path", "")).lower()
@@ -673,6 +802,8 @@ class MainWindow(QMainWindow):
     def _apply_state(self, state: ControllerState) -> None:
         if not state.connected:
             self._apply_waiting_state()
+            if state.error:
+                self.message_label.setText(state.error)
             return
 
         if state.battery_percent is None:
