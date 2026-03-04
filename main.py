@@ -545,7 +545,7 @@ class DualSenseMonitor:
             elif mapped.startswith("full"):
                 status = "Full"
 
-        connection = self._infer_connection_from_sysfs_name(entry)
+        connection = self._infer_connection_from_power_supply_path(base, entry)
         return ControllerState(
             connected=True,
             battery_percent=battery_percent,
@@ -574,11 +574,35 @@ class DualSenseMonitor:
         )
         return any(pattern in lower for pattern in patterns)
 
-    @staticmethod
-    def _infer_connection_from_sysfs_name(name: str) -> str:
-        # Names containing MAC-like suffix are typically Bluetooth devices.
-        if re.search(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", name.lower()):
+    def _infer_connection_from_power_supply_path(self, sysfs_path: str, entry_name: str) -> str:
+        # Try to infer USB vs Bluetooth from sysfs device path.
+        # 1. Check device/driver symlink for 'usb_hid' or 'bluetooth'
+        # 2. Check device/subsystem
+        # 3. Fallback to entry name heuristics
+        
+        device_link = os.path.join(sysfs_path, "device")
+        try:
+            if os.path.islink(device_link):
+                # Resolve symlink to get real device path.
+                real_path = os.path.realpath(device_link)
+                real_path_lower = real_path.lower()
+                
+                # Check if path contains 'usb' or 'bluetooth'.
+                if "/usb" in real_path_lower or "usb" in real_path_lower:
+                    return "USB"
+                if "bluetooth" in real_path_lower or "/hci" in real_path_lower:
+                    return "Bluetooth"
+        except Exception:
+            pass
+        
+        # Fallback: check entry name for MAC-like suffix (typical for BT on some kernels).
+        if re.search(r"[0-9a-f]{2}(:[0-9a-f]{2}){5}", entry_name.lower()):
             return "Bluetooth"
+        
+        # Check for common BT name patterns.
+        if "bt" in entry_name.lower() or "bluetooth" in entry_name.lower():
+            return "Bluetooth"
+        
         return "USB"
 
     def _detect_controller(self) -> Optional[dict]:
