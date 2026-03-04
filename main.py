@@ -850,26 +850,36 @@ class DualSenseMonitor:
         try:
             self._set_nonblocking(dev, True)
 
+            # Collect battery readings from multiple sources to avoid spurious 100% on Windows.
+            all_parsed_results: List[tuple[Optional[int], str]] = []
+
             # USB/BT feature report candidates. Battery byte location can vary.
             for report_id, size in [(0x20, 64), (0x05, 64), (0x09, 64), (0x31, 78)]:
                 try:
                     report = self._get_feature_report(dev, report_id, size)
                     parsed = self._parse_dualsense_battery_from_report(report)
                     if parsed[0] is not None:
-                        return parsed
+                        all_parsed_results.append(parsed)
                 except OSError:
                     continue
                 except Exception:
                     continue
 
-            # Non-blocking input report fallback.
+            # Non-blocking input report fallback (try multiple times).
             for _ in range(8):
-                data = self._read_input_report(dev, 78)
-                if data:
-                    parsed = self._parse_dualsense_battery_from_report(data)
-                    if parsed[0] is not None:
-                        return parsed
+                try:
+                    data = self._read_input_report(dev, 78)
+                    if data:
+                        parsed = self._parse_dualsense_battery_from_report(data)
+                        if parsed[0] is not None:
+                            all_parsed_results.append(parsed)
+                except Exception:
+                    pass
                 time.sleep(0.03)
+
+            # Select the most reliable result from all attempts.
+            if all_parsed_results:
+                return self._select_most_reliable_battery_reading(all_parsed_results)
 
             return None, "Unknown"
         except OSError as exc:
@@ -940,6 +950,46 @@ class DualSenseMonitor:
         if callable(closer):
             closer()
 
+    def _select_most_reliable_battery_reading(
+        self, readings: List[tuple[Optional[int], str]]
+    ) -> tuple[Optional[int], str]:
+        # Filter out suspicious readings (e.g., all 100% on first try).
+        valid_readings = [r for r in readings if r[0] is not None]
+        if not valid_readings:
+            return None, "Unknown"
+
+        # If only one valid reading, return it.
+        if len(valid_readings) == 1:
+            return valid_readings[0]
+
+        # Multiple readings: prefer ones that appear multiple times or are in reasonable range.
+        percentages = [r[0] for r in valid_readings]
+        from collections import Counter
+
+        counter = Counter(percentages)
+        # Get the most common percentage.
+        most_common_pct, count = counter.most_common(1)[0]
+
+        # If a percentage appears 2+ times, use it (more reliable).
+        if count >= 2:
+            matching_reading = next(r for r in valid_readings if r[0] == most_common_pct)
+            return matching_reading
+
+        # Otherwise, prefer middle-range values (5-95%) over extremes (0%, 100%).
+        # This reduces false positives from noise.
+        middle_range = [r for r in valid_readings if 5 <= r[0] <= 95]
+        if middle_range:
+            # Return the lowest (most conservative) of mid-range values.
+            return min(middle_range, key=lambda r: r[0])
+
+        # Fall back to non-extreme readings.
+        non_zero = [r for r in valid_readings if r[0] > 0]
+        if non_zero:
+            return min(non_zero, key=lambda r: r[0])
+
+        # Last resort: return the lowest reading.
+        return min(valid_readings, key=lambda r: r[0])
+
     def _parse_dualsense_battery_from_report(
         self, report: List[int] | bytes
     ) -> tuple[Optional[int], str]:
@@ -978,20 +1028,26 @@ class DualSenseMonitor:
             return parsed_candidates[0]
 
         # Fallback for rare backends exposing direct percentage bytes.
-        # Keep this conservative to avoid false values from unrelated payload bytes.
+        # Keep this very conservative—only use middle-range values (5-95%).
+        # Full (100%) should only come from packed format with proper state bits.
         direct_candidates: List[int] = []
         for idx in range(50, min(len(values), 63)):
             direct = values[idx]
-            if 0 <= direct <= 100 and direct % 5 == 0:
+            # Strict range: 5-95%, exclude 0 and 100 in direct mode.
+            if 5 <= direct <= 95 and direct % 5 == 0:
                 direct_candidates.append(direct)
 
         if direct_candidates:
-            if 100 in direct_candidates:
-                return 100, "Full"
-            # Prefer highest plausible value; low values here are often noise.
-            best_direct = max(direct_candidates)
-            if best_direct >= 50:
-                return best_direct, "Unknown"
+            # Prefer values closer to the middle (50-80%) as they're typically more reliable.
+            # Sort by distance from median, prefer mid-range values.
+            sorted_candidates = sorted(
+                direct_candidates,
+                key=lambda x: abs(x - 50)  # Prefer closer to 50% if uncertain
+            )
+            best_candidate = sorted_candidates[0]
+            # Only return if value is within reasonable range and appears reasonable.
+            if 5 <= best_candidate <= 95:
+                return best_candidate, "Unknown"
 
         return None, "Unknown"
 
