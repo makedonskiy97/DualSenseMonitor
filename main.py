@@ -1034,17 +1034,8 @@ class DualSenseMonitor:
             if parsed[0] is not None:
                 parsed_candidates.append(parsed)
 
-        if parsed_candidates:
-            # Prefer highest percentage; if equal, prefer more specific status over Unknown.
-            parsed_candidates.sort(
-                key=lambda item: (item[0], 1 if item[1] != "Unknown" else 0),
-                reverse=True,
-            )
-            return parsed_candidates[0]
-
         # Fallback for rare backends exposing direct percentage bytes.
-        # Keep this very conservative—only use middle-range values (5-95%).
-        # Full (100%) should only come from packed format with proper state bits.
+        # Keep this conservative and stable against noisy bytes.
         direct_candidates: List[int] = []
         for idx in range(50, min(len(values), 63)):
             direct = values[idx]
@@ -1052,17 +1043,39 @@ class DualSenseMonitor:
             if 5 <= direct <= 95 and direct % 5 == 0:
                 direct_candidates.append(direct)
 
+        packed_primary: Optional[tuple[int, str]] = None
+        if parsed_candidates:
+            # Candidate order is already prioritized by known offsets.
+            packed_primary = parsed_candidates[0]
+
+        if packed_primary is not None and not direct_candidates:
+            return packed_primary
+
+        if packed_primary is not None and direct_candidates:
+            # On Windows direct byte may provide finer-grained percentage than packed nibble,
+            # but it can be noisy. Prefer direct value only when close to previous stable value.
+            if self.system == "Windows" and self._last_stable_battery_percent is not None:
+                closest_direct = min(
+                    direct_candidates,
+                    key=lambda val: abs(val - self._last_stable_battery_percent),
+                )
+                if abs(closest_direct - self._last_stable_battery_percent) <= 10:
+                    return closest_direct, packed_primary[1]
+
+            return packed_primary
+
         if direct_candidates:
-            # Prefer values closer to the middle (50-80%) as they're typically more reliable.
-            # Sort by distance from median, prefer mid-range values.
-            sorted_candidates = sorted(
-                direct_candidates,
-                key=lambda x: abs(x - 50)  # Prefer closer to 50% if uncertain
-            )
-            best_candidate = sorted_candidates[0]
-            # Only return if value is within reasonable range and appears reasonable.
-            if 5 <= best_candidate <= 95:
-                return best_candidate, "Unknown"
+            if self.system == "Windows" and self._last_stable_battery_percent is not None:
+                closest_direct = min(
+                    direct_candidates,
+                    key=lambda val: abs(val - self._last_stable_battery_percent),
+                )
+                return closest_direct, "Unknown"
+
+            # Without history, use median to reduce outliers.
+            ordered = sorted(direct_candidates)
+            median_idx = len(ordered) // 2
+            return ordered[median_idx], "Unknown"
 
         return None, "Unknown"
 
