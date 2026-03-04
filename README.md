@@ -10,8 +10,14 @@ Cross-platform Python GUI app (PySide6) for monitoring PS5 DualSense battery lev
   - Status: Charging / Discharging / Full.
   - Connection: USB / Bluetooth / Not connected.
 - Periodic polling (default: every 5s).
-- Console logs for app start, connection changes, battery updates, and errors.
+- In-app log viewer (`Show Logs`) with refresh/copy.
 - Linux fallback mode via `/sys/class/power_supply` and optional `dualsensectl` when `hidapi` is unavailable.
+- Compact mode overlay (always-on-top, frameless) with:
+  - optional battery percent display,
+  - draggable position,
+  - quick position presets (top/bottom + left/right/center),
+  - right-click context menu,
+  - lock position toggle.
 
 ## Requirements
 
@@ -39,6 +45,16 @@ or explicitly:
 ```bash
 .venv/bin/python main.py
 ```
+
+## UI quick guide
+
+- `Show Logs`: opens buffered app logs in a dialog.
+- `Compact Mode`: switches from the main window to a small always-on-top overlay.
+- `Show % in compact mode`: toggles percent text under compact battery icon.
+- `Position` dropdown: places compact overlay to a preset screen corner/center.
+- Compact overlay controls:
+  - Left click + drag: move overlay.
+  - Right click: context menu (`Show Main Window`, `Exit Compact Mode`, `Show %`, `Lock Position`, `Position`, `Quit`).
 
 ## Build EXE on Windows
 

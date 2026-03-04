@@ -1186,6 +1186,7 @@ class MainWindow(QMainWindow):
         self._compact_icon_label: Optional[BatteryIconLabel] = None
         self._compact_percent_label: Optional[QLabel] = None
         self._compact_drag_offset: Optional[QPoint] = None
+        self._compact_position_locked = False
 
         self._setup_ui()
         self._setup_tray()
@@ -1545,6 +1546,70 @@ class MainWindow(QMainWindow):
 
         self._compact_widget.move(x, y)
 
+    def _show_compact_context_menu(self, global_pos: QPoint) -> None:
+        if not self._compact_mode:
+            return
+
+        menu = QMenu(self)
+
+        show_window_action = QAction("Show Main Window", self)
+        show_window_action.triggered.connect(self.showNormal)
+        menu.addAction(show_window_action)
+
+        exit_compact_action = QAction("Exit Compact Mode", self)
+        exit_compact_action.triggered.connect(self._toggle_compact_mode)
+        menu.addAction(exit_compact_action)
+
+        menu.addSeparator()
+
+        show_percent_action = QAction("Show %", self)
+        show_percent_action.setCheckable(True)
+        show_percent_action.setChecked(self.compact_show_percent_checkbox.isChecked())
+
+        def _toggle_percent() -> None:
+            self.compact_show_percent_checkbox.setChecked(
+                not self.compact_show_percent_checkbox.isChecked()
+            )
+
+        show_percent_action.triggered.connect(_toggle_percent)
+        menu.addAction(show_percent_action)
+
+        lock_position_action = QAction("Lock Position", self)
+        lock_position_action.setCheckable(True)
+        lock_position_action.setChecked(self._compact_position_locked)
+
+        def _toggle_lock_position() -> None:
+            self._compact_position_locked = not self._compact_position_locked
+
+        lock_position_action.triggered.connect(_toggle_lock_position)
+        menu.addAction(lock_position_action)
+
+        position_menu = menu.addMenu("Position")
+        for preset in [
+            "Top Center",
+            "Top Left",
+            "Top Right",
+            "Bottom Left",
+            "Bottom Right",
+        ]:
+            action = QAction(preset, self)
+            action.setCheckable(True)
+            action.setChecked(self.compact_position_combo.currentText() == preset)
+
+            def _set_preset(p: str = preset) -> None:
+                self.compact_position_combo.setCurrentText(p)
+
+            action.triggered.connect(_set_preset)
+            position_menu.addAction(action)
+
+        menu.addSeparator()
+
+        quit_action = QAction("Quit", self)
+        quit_action.triggered.connect(QApplication.instance().quit)
+        menu.addAction(quit_action)
+
+        menu.exec(global_pos)
+
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if (
             self._compact_mode
@@ -1553,12 +1618,21 @@ class MainWindow(QMainWindow):
         ):
             if event.type() == QEvent.MouseButtonPress:
                 mouse_event = event
+                if mouse_event.button() == Qt.RightButton:
+                    self._show_compact_context_menu(mouse_event.globalPosition().toPoint())
+                    return True
                 if mouse_event.button() == Qt.LeftButton:
+                    if self._compact_position_locked:
+                        return True
                     self._compact_drag_offset = mouse_event.globalPosition().toPoint() - self._compact_widget.pos()
                     return True
             elif event.type() == QEvent.MouseMove:
                 mouse_event = event
-                if mouse_event.buttons() & Qt.LeftButton and self._compact_drag_offset is not None:
+                if (
+                    not self._compact_position_locked
+                    and mouse_event.buttons() & Qt.LeftButton
+                    and self._compact_drag_offset is not None
+                ):
                     new_pos = mouse_event.globalPosition().toPoint() - self._compact_drag_offset
                     self._compact_widget.move(new_pos)
                     return True
