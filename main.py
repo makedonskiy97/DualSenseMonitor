@@ -1316,6 +1316,13 @@ class MainWindow(QMainWindow):
         self.connection_label.setText("Connection: Not connected")
         self.status_label.setText("Status: Unknown")
         self.message_label.setText("Waiting for DualSense controller…")
+        self._last_state = ControllerState(
+            connected=False,
+            battery_percent=None,
+            status="Unknown",
+            connection="Not connected",
+        )
+        self._update_compact_mode_display(self._last_state)
         if self.tray_icon:
             self.tray_icon.setIcon(self._make_tray_icon(None))
 
