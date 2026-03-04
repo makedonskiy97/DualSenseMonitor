@@ -95,7 +95,7 @@ def _preload_windows_hidapi_dlls() -> None:
 _preload_windows_hidapi_dlls()
 
 try:
-    from PySide6.QtCore import QObject, Qt, Signal
+    from PySide6.QtCore import QObject, Qt, Signal, QPoint, QEvent
     from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
@@ -104,6 +104,7 @@ try:
         QMenu,
         QSystemTrayIcon,
         QVBoxLayout,
+        QHBoxLayout,
         QWidget,
     )
 except ModuleNotFoundError as exc:
@@ -185,6 +186,10 @@ class DualSenseMonitor:
 
         self._pydualsense_obj = None
         self._linux_lib_failed = False
+        
+        # Log buffer for GUI display
+        self._log_buffer: List[str] = []
+        self._log_buffer_max = 500  # Keep last 500 lines
 
     def add_callback(self, callback: Callable[[ControllerState], None]) -> None:
         self._callbacks.append(callback)
@@ -237,7 +242,17 @@ class DualSenseMonitor:
 
     def _log(self, message: str) -> None:
         now = datetime.now().strftime("%H:%M:%S")
-        print(f"[{now}] {message}", flush=True)
+        formatted = f"[{now}] {message}"
+        print(formatted, flush=True)
+        
+        # Also store in buffer for GUI
+        self._log_buffer.append(formatted)
+        if len(self._log_buffer) > self._log_buffer_max:
+            self._log_buffer.pop(0)
+
+    def get_logs(self) -> str:
+        """Return all buffered logs as a single string."""
+        return "\n".join(self._log_buffer)
 
     def read_state(self) -> ControllerState:
         if self.system == "Windows" and hid is None:
@@ -1096,14 +1111,26 @@ class BatteryIconLabel(QLabel):
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        x, y, width, height = 10, 15, 120, 50
-        terminal_w = 10
+        w = max(1, self.width())
+        h = max(1, self.height())
 
-        border_pen = QPen(QColor("#d0d0d0"), 3)
+        margin_x = max(2, int(w * 0.08))
+        margin_y = max(2, int(h * 0.18))
+        terminal_w = max(3, int(w * 0.08))
+
+        width = max(12, w - (margin_x * 2) - terminal_w - 1)
+        height = max(10, h - (margin_y * 2))
+        x = margin_x
+        y = (h - height) // 2
+
+        border_pen = QPen(QColor("#d0d0d0"), max(1, int(height * 0.06)))
         painter.setPen(border_pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawRoundedRect(x, y, width, height, 6, 6)
-        painter.drawRect(x + width, y + 16, terminal_w, 18)
+
+        terminal_h = max(5, int(height * 0.36))
+        terminal_y = y + (height - terminal_h) // 2
+        painter.drawRect(x + width, terminal_y, terminal_w, terminal_h)
 
         if percent is None:
             fill_ratio = 0.0
@@ -1117,16 +1144,28 @@ class BatteryIconLabel(QLabel):
             else:
                 color = QColor("#e74c3c")
 
-        fill_w = int((width - 6) * fill_ratio)
+        fill_padding = max(1, int(height * 0.08))
+        fill_w = int((width - (fill_padding * 2)) * fill_ratio)
         if fill_w > 0:
             painter.setBrush(color)
             painter.setPen(Qt.NoPen)
-            painter.drawRoundedRect(x + 3, y + 3, fill_w, height - 6, 4, 4)
+            painter.drawRoundedRect(
+                x + fill_padding,
+                y + fill_padding,
+                fill_w,
+                height - (fill_padding * 2),
+                4,
+                4,
+            )
 
         if status == "Charging":
-            painter.setPen(QPen(QColor("#ffffff"), 2))
+            painter.setPen(QPen(QColor("#ffffff"), max(1, int(height * 0.05))))
             bolt = "⚡"
-            painter.drawText(x + width // 2 - 10, y + height // 2 + 8, bolt)
+            painter.drawText(
+                x + width // 2 - max(6, int(width * 0.07)),
+                y + height // 2 + max(5, int(height * 0.16)),
+                bolt,
+            )
 
         painter.end()
         self.setPixmap(pixmap)
@@ -1139,7 +1178,14 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.monitor = monitor
         self.setWindowTitle("DualSense Battery Monitor")
-        self.setMinimumSize(420, 280)
+        self.setMinimumSize(420, 340)
+        
+        self._compact_mode = False
+        self._compact_widget: Optional[QWidget] = None
+        self._last_state = ControllerState()
+        self._compact_icon_label: Optional[BatteryIconLabel] = None
+        self._compact_percent_label: Optional[QLabel] = None
+        self._compact_drag_offset: Optional[QPoint] = None
 
         self._setup_ui()
         self._setup_tray()
@@ -1153,7 +1199,7 @@ class MainWindow(QMainWindow):
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(14)
+        layout.setSpacing(12)
 
         self.icon_label = BatteryIconLabel()
         self.icon_label.setAlignment(Qt.AlignCenter)
@@ -1176,6 +1222,45 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.connection_label)
         layout.addWidget(self.status_label)
         layout.addWidget(self.message_label)
+        
+        # Buttons layout
+        from PySide6.QtWidgets import QPushButton, QCheckBox, QComboBox
+        buttons_layout = QVBoxLayout()
+        buttons_layout.setSpacing(8)
+        
+        self.logs_button = QPushButton("📋 Show Logs")
+        self.logs_button.setStyleSheet("padding: 8px; font-size: 12px;")
+        self.logs_button.clicked.connect(self._show_logs_dialog)
+        buttons_layout.addWidget(self.logs_button)
+        
+        self.compact_button = QPushButton("🗗 Compact Mode")
+        self.compact_button.setStyleSheet("padding: 8px; font-size: 12px;")
+        self.compact_button.clicked.connect(self._toggle_compact_mode)
+        buttons_layout.addWidget(self.compact_button)
+
+        self.compact_position_combo = QComboBox()
+        self.compact_position_combo.addItems(
+            [
+                "Top Center",
+                "Top Left",
+                "Top Right",
+                "Bottom Left",
+                "Bottom Right",
+            ]
+        )
+        self.compact_position_combo.setCurrentText("Top Center")
+        self.compact_position_combo.currentTextChanged.connect(
+            self._on_compact_position_changed
+        )
+        buttons_layout.addWidget(self.compact_position_combo)
+
+        self.compact_show_percent_checkbox = QCheckBox("Show % in compact mode")
+        self.compact_show_percent_checkbox.setChecked(False)
+        self.compact_show_percent_checkbox.toggled.connect(self._on_compact_percent_toggled)
+        buttons_layout.addWidget(self.compact_show_percent_checkbox)
+        
+        layout.addLayout(buttons_layout)
+        layout.addStretch()
 
         self.setCentralWidget(central)
 
@@ -1188,13 +1273,39 @@ class MainWindow(QMainWindow):
         self.tray_icon.setIcon(self._make_tray_icon(None))
 
         menu = QMenu()
+        
+        show_action = QAction("Show Window", self)
+        show_action.triggered.connect(self.showNormal)
+        menu.addAction(show_action)
+        
+        menu.addSeparator()
+        
+        logs_action = QAction("📋 Show Logs", self)
+        logs_action.triggered.connect(self._show_logs_dialog)
+        menu.addAction(logs_action)
+        
+        compact_action = QAction("🗗 Compact Mode", self)
+        compact_action.triggered.connect(self._toggle_compact_mode)
+        menu.addAction(compact_action)
+        
+        menu.addSeparator()
+        
         quit_action = QAction("Quit", self)
         quit_action.triggered.connect(QApplication.instance().quit)
         menu.addAction(quit_action)
 
         self.tray_icon.setContextMenu(menu)
         self.tray_icon.setToolTip("DualSense Battery Monitor")
+        self.tray_icon.activated.connect(self._on_tray_activated)
         self.tray_icon.show()
+
+    def _on_tray_activated(self, reason) -> None:
+        from PySide6.QtWidgets import QSystemTrayIcon
+        if reason == QSystemTrayIcon.DoubleClick:
+            if self.isVisible():
+                self.hide()
+            else:
+                self.showNormal()
 
     def _on_monitor_update(self, state: ControllerState) -> None:
         self.state_received.emit(state)
@@ -1209,6 +1320,8 @@ class MainWindow(QMainWindow):
             self.tray_icon.setIcon(self._make_tray_icon(None))
 
     def _apply_state(self, state: ControllerState) -> None:
+        self._last_state = state
+        
         if not state.connected:
             self._apply_waiting_state()
             if state.error:
@@ -1228,6 +1341,9 @@ class MainWindow(QMainWindow):
         self.icon_label.update_icon(state.battery_percent, state.status)
         self.connection_label.setText(f"Connection: {state.connection}")
         self.status_label.setText(f"Status: {state.status}")
+        
+        # Update compact mode if active
+        self._update_compact_mode_display(state)
 
         if self.tray_icon:
             self.tray_icon.setIcon(self._make_tray_icon(state.battery_percent))
@@ -1267,6 +1383,185 @@ class MainWindow(QMainWindow):
 
         painter.end()
         return QIcon(pixmap)
+
+    def _show_logs_dialog(self) -> None:
+        """Show a dialog with application logs."""
+        from PySide6.QtWidgets import QDialog, QTextEdit, QPushButton, QVBoxLayout
+        
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Application Logs")
+        dialog.setMinimumSize(600, 400)
+        
+        layout = QVBoxLayout(dialog)
+        
+        text_edit = QTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setPlainText(self.monitor.get_logs())
+        text_edit.setStyleSheet("font-family: Courier; font-size: 10px;")
+        layout.addWidget(text_edit)
+        
+        # Buttons
+        button_layout = QVBoxLayout()
+        
+        refresh_btn = QPushButton("🔄 Refresh")
+        refresh_btn.clicked.connect(lambda: text_edit.setPlainText(self.monitor.get_logs()))
+        button_layout.addWidget(refresh_btn)
+        
+        copy_btn = QPushButton("📋 Copy All")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.monitor.get_logs()))
+        button_layout.addWidget(copy_btn)
+        
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dialog.close)
+        button_layout.addWidget(close_btn)
+        
+        layout.addLayout(button_layout)
+        dialog.exec()
+
+    def _toggle_compact_mode(self) -> None:
+        """Toggle between normal and compact mode."""
+        if self._compact_mode:
+            # Exit compact mode
+            self._compact_mode = False
+            if self._compact_widget:
+                self._compact_widget.close()
+                self._compact_widget = None
+            self._compact_icon_label = None
+            self._compact_percent_label = None
+            self.showNormal()
+            self.compact_button.setText("🗗 Compact Mode")
+        else:
+            # Enter compact mode
+            self._compact_mode = True
+            self.hide()
+
+            # Create compact window
+            self._compact_widget = QWidget()
+            self._compact_widget.setWindowFlags(
+                Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
+            )
+            self._compact_widget.setAttribute(Qt.WA_TranslucentBackground, True)
+            self._compact_widget.setAttribute(Qt.WA_ShowWithoutActivating, True)
+
+            layout = QVBoxLayout(self._compact_widget)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+
+            # Small icon
+            small_icon = BatteryIconLabel()
+            small_icon.setFixedSize(96, 48)
+            small_icon.update_icon(self._last_state.battery_percent, self._last_state.status)
+            layout.addWidget(small_icon, alignment=Qt.AlignCenter)
+            self._compact_icon_label = small_icon
+
+            self._compact_percent_label = QLabel("--%")
+            self._compact_percent_label.setAlignment(Qt.AlignCenter)
+            self._compact_percent_label.setStyleSheet(
+                "font-size: 12px; font-weight: 700; color: #f0f0f0;"
+            )
+            self._compact_percent_label.setVisible(
+                self.compact_show_percent_checkbox.isChecked()
+            )
+            layout.addWidget(self._compact_percent_label)
+
+            self._update_compact_size()
+            self._move_compact_to_preset()
+
+            self._compact_widget.installEventFilter(self)
+            self._compact_icon_label.installEventFilter(self)
+            self._compact_percent_label.installEventFilter(self)
+
+            self._update_compact_mode_display(self._last_state)
+
+            self._compact_widget.show()
+            self.compact_button.setText("⛶ Exit Compact Mode")
+
+    def _update_compact_mode_display(self, state: ControllerState) -> None:
+        """Update the compact mode display when state changes."""
+        if self._compact_mode and self._compact_widget:
+            if self._compact_icon_label is not None:
+                self._compact_icon_label.update_icon(state.battery_percent, state.status)
+            if self._compact_percent_label is not None:
+                if state.battery_percent is None:
+                    self._compact_percent_label.setText("--%")
+                else:
+                    self._compact_percent_label.setText(f"{state.battery_percent}%")
+
+    def _on_compact_percent_toggled(self, _: bool) -> None:
+        if self._compact_percent_label is not None:
+            self._compact_percent_label.setVisible(
+                self.compact_show_percent_checkbox.isChecked()
+            )
+        if self._compact_mode and self._compact_widget is not None:
+            self._update_compact_size()
+
+    def _on_compact_position_changed(self, _: str) -> None:
+        if self._compact_mode and self._compact_widget is not None:
+            self._move_compact_to_preset()
+
+    def _update_compact_size(self) -> None:
+        if self._compact_widget is None:
+            return
+        if self.compact_show_percent_checkbox.isChecked():
+            self._compact_widget.setFixedSize(96, 64)
+        else:
+            self._compact_widget.setFixedSize(96, 48)
+
+    def _move_compact_to_preset(self) -> None:
+        if self._compact_widget is None:
+            return
+        screen = QApplication.primaryScreen()
+        if screen is None:
+            return
+
+        geometry = screen.availableGeometry()
+        margin = 12
+        preset = self.compact_position_combo.currentText()
+        width = self._compact_widget.width()
+        height = self._compact_widget.height()
+
+        x = geometry.x() + (geometry.width() - width) // 2
+        y = geometry.y() + margin
+
+        if preset == "Top Left":
+            x = geometry.x() + margin
+            y = geometry.y() + margin
+        elif preset == "Top Right":
+            x = geometry.x() + geometry.width() - width - margin
+            y = geometry.y() + margin
+        elif preset == "Bottom Left":
+            x = geometry.x() + margin
+            y = geometry.y() + geometry.height() - height - margin
+        elif preset == "Bottom Right":
+            x = geometry.x() + geometry.width() - width - margin
+            y = geometry.y() + geometry.height() - height - margin
+
+        self._compact_widget.move(x, y)
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if (
+            self._compact_mode
+            and self._compact_widget is not None
+            and watched in {self._compact_widget, self._compact_icon_label, self._compact_percent_label}
+        ):
+            if event.type() == QEvent.MouseButtonPress:
+                mouse_event = event
+                if mouse_event.button() == Qt.LeftButton:
+                    self._compact_drag_offset = mouse_event.globalPosition().toPoint() - self._compact_widget.pos()
+                    return True
+            elif event.type() == QEvent.MouseMove:
+                mouse_event = event
+                if mouse_event.buttons() & Qt.LeftButton and self._compact_drag_offset is not None:
+                    new_pos = mouse_event.globalPosition().toPoint() - self._compact_drag_offset
+                    self._compact_widget.move(new_pos)
+                    return True
+            elif event.type() == QEvent.MouseButtonRelease:
+                mouse_event = event
+                if mouse_event.button() == Qt.LeftButton:
+                    self._compact_drag_offset = None
+                    return True
+
+        return super().eventFilter(watched, event)
 
     def closeEvent(self, event) -> None:
         self.monitor.stop()
