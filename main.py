@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 import ctypes.util
+import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable, List, Optional
@@ -95,7 +96,7 @@ def _preload_windows_hidapi_dlls() -> None:
 _preload_windows_hidapi_dlls()
 
 try:
-    from PySide6.QtCore import QObject, Qt, Signal, QPoint, QEvent
+    from PySide6.QtCore import QObject, Qt, Signal, QPoint, QEvent, QTimer
     from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication,
@@ -1115,9 +1116,37 @@ class BatteryIconLabel(QLabel):
     def __init__(self) -> None:
         super().__init__()
         self.setFixedSize(160, 80)
+        self._current_percent: Optional[int] = None
+        self._current_status: str = "Unknown"
+        self._animation_phase: float = 0.0
+        self._animation_timer = QTimer(self)
+        self._animation_timer.setInterval(80)
+        self._animation_timer.timeout.connect(self._on_animation_tick)
         self.update_icon(None, "Unknown")
 
     def update_icon(self, percent: Optional[int], status: str) -> None:
+        self._current_percent = percent
+        self._current_status = status
+
+        if status == "Charging":
+            if not self._animation_timer.isActive():
+                self._animation_phase = 0.0
+                self._animation_timer.start()
+        else:
+            if self._animation_timer.isActive():
+                self._animation_timer.stop()
+            self._animation_phase = 0.0
+
+        self._render_icon()
+
+    def _on_animation_tick(self) -> None:
+        self._animation_phase = (self._animation_phase + 0.06) % 1.0
+        self._render_icon()
+
+    def _render_icon(self) -> None:
+        percent = self._current_percent
+        status = self._current_status
+
         pixmap = QPixmap(self.size())
         pixmap.fill(Qt.transparent)
 
@@ -1157,6 +1186,11 @@ class BatteryIconLabel(QLabel):
             else:
                 color = QColor("#e74c3c")
 
+        if status == "Charging":
+            # Smooth pulse while charging.
+            pulse = 0.5 + 0.5 * math.sin(self._animation_phase * 2 * math.pi)
+            color = color.lighter(int(105 + pulse * 45))
+
         fill_padding = max(1, int(height * 0.08))
         fill_w = int((width - (fill_padding * 2)) * fill_ratio)
         if fill_w > 0:
@@ -1171,8 +1205,21 @@ class BatteryIconLabel(QLabel):
                 4,
             )
 
+            if status == "Charging":
+                # Moving glossy highlight to indicate charging animation.
+                inner_h = height - (fill_padding * 2)
+                gloss_w = max(6, int(width * 0.12))
+                travel = max(1, fill_w - gloss_w)
+                gloss_x = x + fill_padding + int(travel * self._animation_phase)
+                gloss_color = QColor(255, 255, 255, 70)
+                painter.setBrush(gloss_color)
+                painter.drawRoundedRect(gloss_x, y + fill_padding, gloss_w, inner_h, 3, 3)
+
         if status == "Charging":
-            painter.setPen(QPen(QColor("#ffffff"), max(1, int(height * 0.05))))
+            bolt_alpha = int(170 + 85 * (0.5 + 0.5 * math.sin(self._animation_phase * 2 * math.pi)))
+            painter.setPen(
+                QPen(QColor(255, 255, 255, bolt_alpha), max(1, int(height * 0.05)))
+            )
             bolt = "⚡"
             painter.drawText(
                 x + width // 2 - max(6, int(width * 0.07)),
