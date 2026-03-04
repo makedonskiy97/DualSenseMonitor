@@ -697,9 +697,14 @@ class DualSenseMonitor:
 
     def _read_battery_linux(self, device_path: bytes) -> tuple[Optional[int], str]:
         # Linux strategy:
-        # 1) Try python libs (pydualsense/dualsense-controller) if installed.
-        # 2) Fallback to external `dualsensectl battery` if available.
-        # 3) Fallback to HID report parsing.
+        # 1) Prefer kernel /sys battery info when available (no hidraw access needed).
+        # 2) Try python libs (pydualsense/dualsense-controller) if installed.
+        # 3) Fallback to external `dualsensectl battery` if available.
+        # 4) Fallback to HID report parsing.
+
+        from_sysfs = self._read_battery_linux_sysfs()
+        if from_sysfs is not None and from_sysfs[0] is not None:
+            return from_sysfs
 
         if not self._linux_lib_failed:
             from_lib = self._read_battery_linux_library()
@@ -710,7 +715,23 @@ class DualSenseMonitor:
         if from_ctl is not None:
             return from_ctl
 
-        return self._read_battery_generic_hid(device_path)
+        try:
+            return self._read_battery_generic_hid(device_path)
+        except PermissionError:
+            # If hidraw access is denied, still try non-HID Linux sources.
+            if from_sysfs is not None:
+                return from_sysfs
+
+            from_ctl_retry = self._read_battery_linux_dualsensectl()
+            if from_ctl_retry is not None:
+                return from_ctl_retry
+            raise
+
+    def _read_battery_linux_sysfs(self) -> Optional[tuple[Optional[int], str]]:
+        state = self._read_linux_sysfs_battery_state()
+        if state is None:
+            return None
+        return state.battery_percent, state.status
 
     def _read_battery_linux_library(self) -> Optional[tuple[Optional[int], str]]:
         try:

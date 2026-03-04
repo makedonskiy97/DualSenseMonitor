@@ -134,6 +134,8 @@ sudo udevadm trigger
 
 Then reconnect the controller.
 
+Note: the app now also tries Linux `/sys/class/power_supply` battery data automatically, so battery percentage can still be shown even when direct HID reads are denied.
+
 ## Notes
 
 - If `hid` cannot load system `hidapi`, the app automatically uses Linux sysfs/`dualsensectl` fallback.
